@@ -1,12 +1,13 @@
 import streamlit as st
 import os
 import docx
+import fitz # PyMuPDF for PDF hyperlink extraction
 import re
 import phonenumbers
 import spacy
 import nltk
 from collections import Counter
-from PyPDF2 import PdfReader
+# from PyPDF2 import PdfReader # Not strictly needed if fitz handles all PDF text/link extraction
 import textract
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
@@ -17,18 +18,19 @@ from urllib.parse import urlparse
 import zipfile
 import xml.etree.ElementTree as ET
 
+
 # --- Setup NLTK & spaCy ---
 try:
     nltk.data.find('corpora/stopwords')
-except nltk.downloader.DownloadError:
+except Exception: # Catch a more general Exception if stopwords are not found
     nltk.download('stopwords')
 try:
     nltk.data.find('corpora/wordnet')
-except nltk.downloader.DownloadError:
+except Exception: # Catch a more general Exception if wordnet is not found
     nltk.download('wordnet')
 try:
     nltk.data.find('tokenizers/punkt')
-except nltk.downloader.DownloadError:
+except Exception: # Catch a more general Exception if punkt is not found
     nltk.download('punkt')
 
 try:
@@ -36,7 +38,6 @@ try:
 except OSError:
     st.error("spaCy model 'en_core_web_sm' not found. Please run: python -m spacy download en_core_web_sm")
     st.stop()
-
 stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 
@@ -59,37 +60,100 @@ except Exception as e:
     st.error(f"An unexpected error occurred while loading the model/vectorizer: {e}")
     st.stop()
 
-# --- Text Extraction ---
-def extract_text(file):
-    ext = file.name.split('.')[-1].lower()
-    temp_path = f"temp_resume.{ext}"
+# --- Text Extraction Helpers ---
+
+def extract_text_and_hyperlinks_from_pdf(pdf_path):
+    """
+    Extracts text and hyperlinks from a PDF file using PyMuPDF (fitz).
+    Returns a tuple: (extracted_text_string, list_of_urls).
+    """
+    text = ""
+    urls = []
+    try:
+        doc = fitz.open(pdf_path)
+        for page_num in range(doc.page_count):
+            page = doc.load_page(page_num)
+            text += page.get_text() # Extract visible text
+            
+            # Extract links/annotations
+            page_links = page.get_links()
+            for link in page_links:
+                if link['kind'] == fitz.LINK_URI: # Check if it's a URI link
+                    urls.append(link['uri'])
+        doc.close()
+    except Exception as e:
+        st.error(f"Error extracting text or links from PDF: {e}")
+        text = "" # Ensure text is empty if extraction fails
+        urls = []
+    return text.strip(), list(set(urls))
+
+def extract_hyperlinks_from_docx(file_path):
+    """
+    Reads raw XML for hyperlinks from docx file using zipfile and xml.etree.
+    Returns a list of URLs.
+    """
+    urls = []
+    try:
+        with zipfile.ZipFile(file_path) as docx_zip:
+            if 'word/_rels/document.xml.rels' in docx_zip.namelist():
+                rels_content = docx_zip.read('word/_rels/document.xml.rels').decode('utf-8')
+                tree = ET.fromstring(rels_content)
+                ns = {'r': 'http://schemas.openxmlformats.org/package/2006/relationships'}
+                for rel in tree.findall('r:Relationship', ns):
+                    url = rel.attrib.get('Target')
+                    # Filter for external URLs (http/https)
+                    if url and url.startswith(('http://', 'https://')):
+                        urls.append(url)
+    except Exception as e:
+        # st.warning(f"Could not extract hyperlinks from DOCX: {e}") # Optional: show debug warning
+        pass # Silently fail if docx is malformed or no rels found
+    return list(set(urls)) # Return unique hyperlinks
+
+# --- Main Text Extraction Function ---
+def extract_text(file_upload_object):
+    """
+    Main function to extract text and file-specific URLs from uploaded resume files.
+    Handles PDF, DOCX, and TXT formats.
+    Returns a tuple: (extracted_text_string, list_of_urls_found_in_file).
+    """
+    ext = file_upload_object.name.split('.')[-1].lower()
+    temp_path = f"temp_resume_upload.{ext}" # Use a distinct temp file name
     
-    # Ensure the file pointer is at the beginning
-    file.seek(0)
+    # Ensure the file pointer is at the beginning and save to temp file
+    file_upload_object.seek(0)
     with open(temp_path, "wb") as f:
-        f.write(file.read())
+        f.write(file_upload_object.read())
 
     text = ""
+    file_specific_urls = [] # List to capture URLs found directly by file parser (PDF/DOCX)
+
     try:
         if ext == 'pdf':
-            reader = PdfReader(temp_path)
-            text = ''.join([p.extract_text() or "" for p in reader.pages])
+            text, file_specific_urls = extract_text_and_hyperlinks_from_pdf(temp_path)
+            
         elif ext == 'docx':
             doc = docx.Document(temp_path)
             text = '\n'.join([p.text for p in doc.paragraphs])
+            file_specific_urls = extract_hyperlinks_from_docx(temp_path) # Call helper for DOCX links
+
         elif ext == 'txt':
             with open(temp_path, 'r', encoding='utf-8') as f:
                 text = f.read()
+            # For TXT, explicit hyperlinks are rare; regex will catch them later
+
         else:
-            # textract might not support all formats, but is a good fallback
+            # Fallback for other types using textract
             text = textract.process(temp_path).decode('utf-8')
+            
     except Exception as e:
-        st.error(f"Error extracting text from {ext} file: {e}")
+        st.error(f"Error processing {ext} file: {e}")
         text = ""
+        file_specific_urls = [] # Ensure URLs are also cleared on error
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
-    return text.strip()
+            
+    return text.strip(), list(set(file_specific_urls)) # Return unique URLs found during extraction
 
 # --- Preprocessing ---
 def preprocess(text):
@@ -99,21 +163,51 @@ def preprocess(text):
     return ' '.join([lemmatizer.lemmatize(w) for w in words if w not in stop_words and len(w) > 1])
 
 # --- Structured Info Extraction ---
+
 def extract_name(text):
+    """
+    Improved name extraction focusing on the top of the resume and spaCy's PERSON entities.
+    """
+    # 1. Prioritize lines at the very top of the resume
+    lines = text.split('\n')
+    top_lines = [line.strip() for line in lines[:8] if line.strip()] # Consider top 8 non-empty lines
+
+    # Try to find a single, prominent capitalized name in the top few lines
+    for line in top_lines:
+        words = line.split()
+        # Look for lines that are mostly capitalized, and have 2-4 words (common for names)
+        if 2 <= len(words) <= 4 and all(word[0].isupper() or not word.isalpha() for word in words):
+            # Check if it's not likely an email/phone/address line
+            if '@' not in line and not re.search(r'\d{5,}', line):
+                return line.title() # Return title case for consistency
+
+    # 2. Use spaCy's PERSON entity recognition
     doc = nlp(text)
+    
+    # Collect all PERSON entities that look like a full name
+    potential_names = []
     for ent in doc.ents:
         if ent.label_ == "PERSON":
-            # Simple heuristic: often the first PERSON entity in a resume is the name
-            # Or look for capitalized words at the beginning of the resume
-            if len(ent.text.split()) >= 2 and len(ent.text.split()) <= 4: # Consider common name lengths
-                return ent.text.title()
-    
-    # Fallback: Look for capitalized lines at the very beginning
-    for line in text.split('\n')[:5]: # Check first few lines
-        if line.strip() and line.strip().isupper() and len(line.split()) >= 2:
-            return line.strip().title()
-            
+            name_words = ent.text.split()
+            # Heuristic: A name should have at least two words, and not too many
+            # and generally be capitalized or Title Case
+            if 2 <= len(name_words) <= 4 and all(word[0].isupper() for word in name_words if word.isalpha()):
+                potential_names.append(ent.text)
+
+    # If multiple potential names, try to pick the one closest to the top of the document
+    if potential_names:
+        # Sort by their appearance order in the original text
+        potential_names.sort(key=lambda x: text.find(x))
+        # Often the first valid PERSON entity is the name
+        return potential_names[0].title()
+
+    # 3. Fallback: Look for lines that are entirely uppercase in the top section
+    for line in top_lines:
+        if line.isupper() and 2 <= len(line.split()) <= 4:
+            return line.title()
+
     return "Not found"
+
 
 def extract_email(text):
     matches = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
@@ -135,11 +229,13 @@ def extract_phone(text):
     
     # Fallback to phonenumbers library if regex fails, good for international numbers
     try:
-        # Attempt to parse phone numbers assuming default region 'IN' (India)
+        import phonenumbers # Re-import if not at top level
         for match in phonenumbers.PhoneNumberMatcher(text, "IN"):
             return phonenumbers.format_number(match.number, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+    except ImportError:
+        pass # st.warning("phonenumbers library not installed. Phone extraction might be limited.")
     except Exception:
-        pass # Ignore errors from phonenumbers if parsing fails
+        pass # Ignore other errors from phonenumbers if parsing fails
 
     return "Not found"
 
@@ -147,36 +243,18 @@ def extract_skills(text):
     text = text.lower()
     found_skills = []
     for s in SKILLS:
-        if s in text:
+        # Use word boundaries to avoid partial matches (e.g., 'java' in 'javascript')
+        # This regex ensures ' java ' or 'java.' or 'java,' etc.
+        if re.search(r'\b' + re.escape(s) + r'\b', text):
             found_skills.append(s)
     return found_skills or ["Not found"]
 
-# --- Extract URLs (including hyperlinks) ---
+# --- Extract URLs from raw text (regex-based) ---
 def extract_urls(text):
-    # Regex to catch HTTP/HTTPS URLs
+    # Regex to catch HTTP/HTTPS URLs explicitly written in text
     url_pattern = r'(https?://[^\s)>\]]+)'
     urls = re.findall(url_pattern, text)
     return list(set(urls)) # Return unique URLs
-
-# --- Extract hyperlinks from docx separately ---
-def extract_hyperlinks_from_docx(file_path):
-    # Reads raw XML for hyperlinks from docx file
-    urls = []
-    try:
-        with zipfile.ZipFile(file_path) as docx_zip:
-            if 'word/_rels/document.xml.rels' in docx_zip.namelist():
-                rels_content = docx_zip.read('word/_rels/document.xml.rels').decode('utf-8')
-                tree = ET.fromstring(rels_content)
-                ns = {'r': 'http://schemas.openxmlformats.org/package/2006/relationships'}
-                for rel in tree.findall('r:Relationship', ns):
-                    url = rel.attrib.get('Target')
-                    # Filter for external URLs
-                    if url and url.startswith(('http://', 'https://')):
-                        urls.append(url)
-    except Exception as e:
-        # st.warning(f"Could not extract hyperlinks from DOCX: {e}") # Optional: show debug warning
-        pass # Silently fail if docx is malformed or no rels found
-    return list(set(urls)) # Return unique hyperlinks
 
 # --- Summary Generator (Conceptual for Achievements/Projects) ---
 def extract_sections(text, keywords):
@@ -422,6 +500,10 @@ def detect_platform(url):
         return 'hackerrank'
     if 'github.com' in domain:
         return 'github'
+    if 'linkedin.com' in domain: # Added LinkedIn detection
+        return 'linkedin'
+    if 'geeksforgeeks.org' in domain: # Added GFG detection
+        return 'gfg'
     return None
 
 # --- Streamlit UI ---
@@ -442,37 +524,34 @@ if st.button("Process Resume"):
     if file is not None:
         st.session_state['processed_file'] = file.name # Store the file name to check if something is processed
         with st.spinner("Processing..."):
-            text = extract_text(file)
+            # CALL THE MODIFIED EXTRACT_TEXT HERE
+            text, file_extracted_urls = extract_text(file) # Capture both text and URLs
+
             if not text:
                 st.warning("Failed to extract text from the resume. Please try a different file or format.")
                 st.stop()
 
-            # Extract structured info
+            # Extract structured info (using the 'text' variable)
             name = extract_name(text)
             email = extract_email(text)
             phone = extract_phone(text)
             skills = extract_skills(text)
 
-            # Extract URLs from text
-            urls_from_text = extract_urls(text)
+            # Extract URLs from the general text content (e.g., if URLs are just typed out)
+            urls_from_text_regex = extract_urls(text)
             
-            # If docx, try extracting hyperlinks too
-            urls_from_hyperlinks = []
-            if file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                # Create a temporary file to pass path to docx hyperlink extractor
-                temp_docx_path = "temp_hyperlink_resume.docx"
-                file.seek(0) # Reset file pointer
-                with open(temp_docx_path, "wb") as f:
-                    f.write(file.read())
-                urls_from_hyperlinks = extract_hyperlinks_from_docx(temp_docx_path)
-                if os.path.exists(temp_docx_path):
-                    os.remove(temp_docx_path)
-
-            # Combine and get unique URLs
-            all_urls = list(set(urls_from_text + urls_from_hyperlinks))
+            # Combine all collected URLs and get unique ones
+            all_urls = list(set(file_extracted_urls + urls_from_text_regex))
             
             # Filter coding profile URLs
             coding_urls = [u for u in all_urls if detect_platform(u)]
+            
+            # Separate out LinkedIn and GFG as they are not "coding profiles" in the same sense as competitive programming sites
+            linkedin_urls = [u for u in coding_urls if detect_platform(u) == 'linkedin']
+            gfg_urls = [u for u  in coding_urls if detect_platform(u) == 'gfg']
+            # Remove them from coding_urls if you want to display them separately
+            coding_urls = [u for u in coding_urls if detect_platform(u) not in ['linkedin', 'gfg']]
+
 
             # Dynamically extract achievements and projects
             achievements, projects = get_achievements_projects(text)
@@ -487,25 +566,46 @@ if st.button("Process Resume"):
             st.info(f"**{job}** with confidence **{conf*100:.2f}%**")
 
             # Show coding profiles info
-            if coding_urls:
-                st.subheader("Detected Coding Profiles & Stats")
-                for url in coding_urls:
-                    platform = detect_platform(url)
-                    st.markdown(f"**{platform.title()} Profile:** [{url}]({url})")
-                    if platform == 'codechef':
-                        st.write(scrape_codechef(url))
-                    elif platform == 'leetcode':
-                        st.write(scrape_leetcode(url))
-                    elif platform == 'codeforces':
-                        st.write(scrape_codeforces(url))
-                    elif platform == 'hackerrank':
-                        st.write(scrape_hackerrank(url))
-                    elif platform == 'github':
-                        st.write(scrape_github(url))
-                    else:
-                        st.write("No specific scraper available for this platform.")
+            if coding_urls or linkedin_urls or gfg_urls:
+                st.subheader("Detected Online Profiles & Stats")
+                
+                # Display Competitive Programming Profiles
+                if coding_urls:
+                    st.markdown("##### Competitive Programming & Code Hosting")
+                    for url in coding_urls:
+                        platform = detect_platform(url)
+                        st.markdown(f"**{platform.title()} Profile:** [{url}]({url})")
+                        if platform == 'codechef':
+                            st.write(scrape_codechef(url))
+                        elif platform == 'leetcode':
+                            st.write(scrape_leetcode(url))
+                        elif platform == 'codeforces':
+                            st.write(scrape_codeforces(url))
+                        elif platform == 'hackerrank':
+                            st.write(scrape_hackerrank(url))
+                        elif platform == 'github':
+                            st.write(scrape_github(url))
+                        else:
+                            st.write("No specific scraper available for this platform.")
+                
+                # Display LinkedIn Profiles
+                if linkedin_urls:
+                    st.markdown("##### Professional Networking")
+                    for url in linkedin_urls:
+                        st.markdown(f"**LinkedIn Profile:** [{url}]({url})")
+                        # You could add a simple LinkedIn scraper if you wish,
+                        # but it's usually very complex due to login requirements and dynamic content.
+                        st.write("LinkedIn profile detected.")
+                
+                # Display GFG Profiles
+                if gfg_urls:
+                    st.markdown("##### Learning & Coding Resources")
+                    for url in gfg_urls:
+                        st.markdown(f"**GeeksforGeeks Profile:** [{url}]({url})")
+                        # You could add a GFG scraper here similar to others.
+                        st.write("GeeksforGeeks profile detected.")
             else:
-                st.info("No common coding profile URLs (CodeChef, LeetCode, Codeforces, HackerRank, GitHub) detected in the resume.")
+                st.info("No common coding profile URLs (CodeChef, LeetCode, Codeforces, HackerRank, GitHub, LinkedIn, GeeksforGeeks) detected in the resume.")
     else:
         st.warning("Please upload a resume file to process.")
 

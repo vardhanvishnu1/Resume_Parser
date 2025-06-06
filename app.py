@@ -13,6 +13,7 @@ from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import spacy
 from collections import Counter
+import phonenumbers
 
 # NLTK & spaCy setup
 try:
@@ -38,23 +39,26 @@ SKILLS = ['python', 'java', 'c++', 'sql', 'excel', 'machine learning', 'deep lea
 # ------------------ Extractor Functions ------------------
 def extract_name(text):
     doc = nlp(text)
-    for ent in doc.ents:
-        if ent.label_ == 'PERSON':
-            return ent.text
-    return "Not found"
+    names = [ent.text for ent in doc.ents if ent.label_ == 'PERSON']
+    return names[0] if names else "Not found"
 
 def extract_email(text):
-    match = re.search(r'\S+@\S+', text)
-    return match.group() if match else "Not found"
+    match = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+    return match[0] if match else "Not found"
 
 def extract_phone(text):
-    match = re.search(r'(\+?\d[\d\-\(\) ]{8,}\d)', text)
-    return match.group() if match else "Not found"
+    phone_numbers = []
+    for match in phonenumbers.PhoneNumberMatcher(text, "IN"):
+        phone_numbers.append(phonenumbers.format_number(match.number, phonenumbers.PhoneNumberFormat.INTERNATIONAL))
+    return phone_numbers[0] if phone_numbers else "Not found"
 
 def extract_skills(text):
-    words = nltk.word_tokenize(text.lower())
-    found = list(set([word for word in words if word in SKILLS]))
-    return found if found else ["Not found"]
+    text = text.lower()
+    skills_found = []
+    for skill in SKILLS:
+        if skill in text:
+            skills_found.append(skill)
+    return skills_found if skills_found else ["Not found"]
 
 # ------------------ ML Model Load ------------------
 try:

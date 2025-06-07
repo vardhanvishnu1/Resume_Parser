@@ -254,7 +254,7 @@ def extract_project_tech_stack(project_text, skills_list):
     else:
         return "Tech stack not explicitly mentioned or recognized."
 
-def format_achievements(achievements_text, max_bullets=5): # Default max_bullets for competitive programming achievements
+def format_achievements(achievements_text, max_bullets=5): # Default max_bullets for general achievements
     """
     Extracts top sentences from achievement text and formats them as a bulleted list.
     Aims for conciseness by selecting a limited number of high-scoring sentences.
@@ -314,103 +314,108 @@ def get_achievements_projects(text):
             extracted_projects_text = all_sections[kw]
             break
 
-    # Define a comprehensive list of keywords specific to competitive programming
-    competitive_programming_terms = [
-        "competitive programming", "coding contest", "hackathon",
-        "codeforces", "leetcode", "topcoder", "kick start", "hacker cup",
-        "icpc", "programming challenge", "algo", "data structures", "contest",
-        "rank", "medal", "global", "national", "regional", "problem solving",
-        "google hash code", "hash code", "codejam", "gssoc", "girlscript summer of code",
-        "smart india hackathon", "sih", "codegam", "nagarro coding contest",
-        "zonal", "finalist", "winner", "runner-up", "olympiad" 
-    ]
-
-    cp_achievements_content = []
-    
-    # If a general achievements block was found, filter sentences within it
-    if extracted_general_achievements_text:
-        # Split into sentences for finer grain filtering
-        sents = sent_tokenize(extracted_general_achievements_text)
-        
-        for sent in sents:
-            sent_lower = sent.lower()
-            # Check if any competitive programming term exists in the sentence
-            if any(term in sent_lower for term in competitive_programming_terms):
-                cp_achievements_content.append(sent.strip())
-    
-    # Combine the filtered sentences into a single text block for formatting
-    cp_achievements_text = "\n".join(cp_achievements_content)
-
-    # Format only the competitive programming achievements
-    achievements_formatted = format_achievements(cp_achievements_text)
-    
-    # Extract tech stack for projects
+    achievements_formatted = format_achievements(extracted_general_achievements_text) 
     projects_summary = extract_project_tech_stack(extracted_projects_text, SKILLS)
     
     return achievements_formatted, projects_summary 
 
 def extract_cpi(text):
     """
-    Extracts CPI/CGPA/GPA or equivalent percentage from the resume text,
-    prioritizing the education section.
+    Extracts B.Tech CPI/CGPA/GPA specifically from the resume text.
     """
     education_keywords = ["education", "academic qualifications", "academics"]
-    # Use the updated extract_sections that always considers education keywords implicitly
-    sections = extract_sections(text, education_keywords) 
+    sections = extract_sections(text, education_keywords)
     education_text = ""
     for kw in education_keywords:
         if sections.get(kw):
             education_text = sections[kw]
             break
 
-    search_text = education_text if education_text.strip() else text # Search in education section, fallback to full text if empty
+    if not education_text.strip():
+        return "Not found"
+
+    # Keywords to identify B.Tech or equivalent degree sections
+    btech_keywords = [
+        r'bachelor\s*of\s*technology',
+        r'b\.?tech',
+        r'engineering',
+        r'b\.?e\b', # Bachelor of Engineering
+        r'undergraduate'
+    ]
+
+    lines = education_text.split('\n')
+    btech_start_index = -1
+    
+    # Find the start index of the B.Tech block
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        if any(re.search(kw, line_lower) for kw in btech_keywords):
+            btech_start_index = i
+            break # Found the start of B.Tech block
+
+    search_text_for_cpi = ""
+    if btech_start_index != -1:
+        btech_end_index = -1
+        # Now find the end of this block. It ends when a new degree/board entry begins
+        # or a very long empty sequence occurs.
+        for i in range(btech_start_index + 1, len(lines)):
+            line_lower = lines[i].lower()
+            # General heuristic for new degree/board:
+            # - Contains "Board" or "Class" or "X", "XII", "10th", "12th" or "SSC" but not "b.tech" or "engineering" (to avoid matching multiple B.Tech degrees if present)
+            # - Or if it's a new post-graduate degree (Master, Ph.D.)
+            # - Or if it's a short capitalized line indicating a new degree/board, not a year.
+            if (re.search(r'\b(cbse|board|class|x|xii|10th|12th|ssc)\b', line_lower) and not any(re.search(kw, line_lower) for kw in btech_keywords)) or \
+               (re.search(r'(master|ph\.?d|post\s*graduate)', line_lower) and len(line_lower.split()) < 6) or \
+               (len(lines[i].strip().split()) <= 4 and lines[i].strip() and lines[i].strip()[0].isupper() and not re.search(r'\d{4}', lines[i].strip())): 
+                btech_end_index = i
+                break
+        
+        if btech_end_index == -1: # If no explicit end found, take till end of education text
+            btech_end_index = len(lines)
+        
+        # Now, `btech_related_text_lines` will be the relevant block
+        btech_related_text_lines = lines[btech_start_index:btech_end_index]
+        search_text_for_cpi = "\n".join(btech_related_text_lines).strip()
+    else: # If B.Tech keywords were not found, search the entire education text as a fallback
+        search_text_for_cpi = education_text
+
+    if not search_text_for_cpi:
+        return "Not found"
 
     # Regex patterns for CGPA/GPA (e.g., 8.5, 9.25/10, 8.9 out of 10)
-    # This pattern looks for a number with an optional decimal and 1-2 digits after it,
-    # followed by or preceded by CPI/CGPA/GPA/SGPA, possibly with "/10" or "out of 10".
     cpi_gpa_patterns = [
-        re.compile(r'(?:CPI|CGPA|GPA|SGPA)\s*[:=]?\s*(\d(?:\.\d{1,2})?)(?:\s*\/10|\s*out of 10)?', re.IGNORECASE),
         re.compile(r'(\d(?:\.\d{1,2})?)\s*(?:CPI|CGPA|GPA|SGPA)(?:\s*\/10|\s*out of 10)?', re.IGNORECASE),
-        re.compile(r'scored\s*(\d(?:\.\d{1,2})?)(?:\s*\/10|\s*out of 10)', re.IGNORECASE)
+        re.compile(r'(?:CPI|CGPA|GPA|SGPA)\s*[:=]?\s*(\d(?:\.\d{1,2})?)(?:\s*\/10|\s*out of 10)?', re.IGNORECASE),
+        re.compile(r'scored\s*(\d(?:\.\d{1,2})?)(?:\s*\/10|\s*out of 10)', re.IGNORECASE),
+        re.compile(r'\b(?:aggregate|overall)\s*(\d(?:\.\d{1,2})?)(?:\s*\/10|\s*out of 10)\b', re.IGNORECASE),
+        re.compile(r'(\d(?:\.\d{1,2})?)\s*\/\s*10(?:\.0)?', re.IGNORECASE),
+        re.compile(r'\b(\d{1}\.\d{1,2})\b', re.IGNORECASE), # Matches single digit.decimal.1-2 digits like 6.93
+        re.compile(r'\b(10(?:\.0{1,2})?)\b', re.IGNORECASE) # Matches perfect 10 or 10.0, 10.00
     ]
 
-    # Regex patterns for percentages (e.g., 85%, 90.5%)
-    percentage_patterns = [
-        re.compile(r'(\d{1,3}(?:\.\d{1,2})?)\s*%', re.IGNORECASE),
-        re.compile(r'(?:percentage|score)\s*[:=]?\s*(\d{1,3}(?:\.\d{1,2})?)\s*%', re.IGNORECASE)
-    ]
-
-    # Search for CGPA/GPA first
+    # Search for CGPA/GPA within the B.Tech related text
     for pattern in cpi_gpa_patterns:
-        matches = pattern.findall(search_text)
+        matches = pattern.findall(search_text_for_cpi)
         for match in matches:
             try:
-                val = float(match)
+                # Ensure match is a string, not a tuple from multiple capture groups if pattern has them
+                score_str = match if isinstance(match, str) else match[0] # Take the first group if it's a tuple
+                val = float(score_str)
                 if 0.0 <= val <= 10.0: # Valid range for typical CGPA/GPA
-                    # If it's a whole number like '8' and not specified as '/10', add it.
-                    # Otherwise, standardize to '/10' for clarity if it's a decimal.
-                    if '.' in match: # Check if it contains a decimal point
-                        return f"{val:.2f}/10" # Format to 2 decimal places if it was a float, for consistency
+                    # Format to 2 decimal places if it was a float, for consistency
+                    # or as an integer if it's a whole number like 8, 9, 10
+                    if '.' in score_str:
+                        return f"{val:.2f}/10"
                     else:
-                        return f"{val}/10" # Keep as is if it was integer
+                        return f"{int(val)}/10"
             except ValueError:
                 continue
 
-    # If no CGPA/GPA found, search for percentage
-    for pattern in percentage_patterns:
-        matches = pattern.findall(search_text)
-        for match in matches:
-            try:
-                val = float(match)
-                if 0.0 <= val <= 100.0: # Valid range for percentage
-                    return f"{val}%"
-            except ValueError:
-                continue
-                
+    # If no specific B.Tech CGPA/GPA found, return "Not found"
     return "Not found"
 
 
-def generate_summary(name, email, phone, skills, cpi, achievements, projects): # Added cpi parameter
+def generate_summary(name, email, phone, skills, cpi, projects):
     summary = f"""
     <div style="background-color:#F0F2F6; padding: 20px; border-radius: 10px; border: 1px solid #e0e0e0; margin-bottom: 20px;">
         <h4 style="color:#0056b3; border-bottom: 2px solid #0056b3; padding-bottom: 10px; margin-top: 0;">Resume Summary</h4>
@@ -418,7 +423,7 @@ def generate_summary(name, email, phone, skills, cpi, achievements, projects): #
         <p><strong>Email:</strong> {email}</p>
         <p><strong>Phone:</strong> {phone}</p>
         <p><strong>Skills:</strong> {', '.join(skills)}</p>
-        <p><strong>Academic Score (CPI/CGPA/GPA):</strong> {cpi}</p> <p><strong>Competitive Programming Achievements:</strong> {achievements}</p>
+        <p><strong>B.Tech Academic Score (CPI/CGPA/GPA):</strong> {cpi}</p> 
         <p><strong>Tech stack used in Projects:</strong> {projects}</p>
     </div>
     """
@@ -589,27 +594,31 @@ if st.button("Process Resume & Calculate ATS Score", key="process_button"):
             email = extract_email(text)
             phone = extract_phone(text)
             skills = extract_skills(text)
-            cpi = extract_cpi(text) # <--- Added CPI extraction
+            cpi = extract_cpi(text) 
 
             achievements_formatted, projects_summary = get_achievements_projects(text) 
 
-            st.markdown("---") # Separator before results
+            st.markdown("---") 
             st.header("Analysis Results")
 
             if job_description:
                 ats_score = calculate_ats_score(text, job_description)
-                # Improved ATS score display message
-                if ats_score>0:  st.markdown(f"<h3 style='color:#0056b3;'>🎯 ATS match score according to job description : <span style='color:#28a745;'>**{ats_score}%**</span></h3>", unsafe_allow_html=True)
+                st.markdown(f"<h3 style='color:#0056b3;'>🎯 ATS Match Score: <span style='color:#28a745;'>**{ats_score}%**</span></h3>", unsafe_allow_html=True)
+                if ats_score < 50:
+                    st.info("Consider tailoring your resume more closely to the job description's keywords.")
+                elif ats_score < 75:
+                    st.info("Good match! Review the job description for more specific keywords to improve further.")
                 else:
-                    st.info("Paste a Job Description to get an ATS Match Score.")
+                    st.success("Excellent match! Your resume aligns well with the job description.")
+            else:
+                st.info("Paste a Job Description to get an ATS Match Score.")
 
             st.subheader("Resume Summary")
-            # Passed cpi to generate_summary
-            st.markdown(generate_summary(name, email, phone, skills, cpi, achievements_formatted, projects_summary), unsafe_allow_html=True)
+            st.markdown(generate_summary(name, email, phone, skills, cpi, projects_summary), unsafe_allow_html=True)
 
             job, conf = classify_job(text)
             st.subheader("Predicted Job Role")
-            st.info(f"**{job}**")
+            st.info(f"**{job}** with confidence **{conf*100:.2f}%**")
 
 st.markdown("---")
 st.caption("Developed by **Vardhan Bharathula**")

@@ -55,10 +55,6 @@ except Exception as e:
     st.stop()
 
 def extract_text_from_pdf(pdf_path):
-    """
-    Extracts text from a PDF file using PyMuPDF (fitz).
-    Returns the extracted text string.
-    """
     text = ""
     try:
         doc = fitz.open(pdf_path)
@@ -72,11 +68,6 @@ def extract_text_from_pdf(pdf_path):
     return text.strip()
 
 def extract_text(file_upload_object):
-    """
-    Main function to extract text from uploaded resume files.
-    Handles PDF, DOCX, and TXT formats.
-    Returns the extracted text string.
-    """
     ext = file_upload_object.name.split('.')[-1].lower()
     
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}")
@@ -118,9 +109,6 @@ def preprocess(text):
     return ' '.join([lemmatizer.lemmatize(w) for w in words if w not in stop_words and len(w) > 1])
 
 def extract_name(text):
-    """
-    Improved name extraction focusing on the top of the resume and spaCy's PERSON entities.
-    """
     lines = text.split('\n')
     top_lines = [line.strip() for line in lines[:8] if line.strip()]
 
@@ -184,7 +172,6 @@ def extract_skills(text):
 def extract_sections(text, keywords):
     sections_content = {}
     current_section = None
-    # Ensure 'education' and related terms are always considered for section extraction
     all_keywords = set(keywords + ["education", "academic qualifications", "academics"])
     section_patterns = {kw: re.compile(r'^\s*' + re.escape(kw) + r'(?:\s*[:.\-]?\s*[\r\n]|\s*$)', re.IGNORECASE | re.MULTILINE) for kw in all_keywords}
 
@@ -192,7 +179,7 @@ def extract_sections(text, keywords):
     for i, line in enumerate(lines):
         line_lower = line.strip().lower()
         found_section = False
-        for keyword in all_keywords: # Iterate over all relevant keywords
+        for keyword in all_keywords:
             if section_patterns[keyword].match(line_lower):
                 current_section = keyword
                 sections_content[current_section] = []
@@ -201,7 +188,7 @@ def extract_sections(text, keywords):
         
         if not found_section and current_section is not None:
             is_new_section_start = False
-            for kw in all_keywords: # Check if the current line starts a new known section
+            for kw in all_keywords:
                 if section_patterns[kw].match(line_lower):
                     is_new_section_start = True
                     break
@@ -214,7 +201,6 @@ def extract_sections(text, keywords):
     return {k: "\n".join(v) for k, v in sections_content.items()}
 
 def summarize_text(text, num_sentences=5):
-    # This function is now mostly for general summary if needed, not for specific bullet point formatting
     if not text.strip():
         return ""
     
@@ -230,14 +216,10 @@ def summarize_text(text, num_sentences=5):
         
     top_sents_indices = sorted(sent_scores, key=sent_scores.get, reverse=True)[:num_sentences]
     
-    # Reconstruct summary in original sentence order
     sorted_sents = sorted(top_sents_indices)
     return ' '.join([sents[i] for i in sorted_sents])
 
 def extract_project_tech_stack(project_text, skills_list):
-    """
-    Extracts tech stack keywords from project description text.
-    """
     if not project_text.strip():
         return "No Projects Done."
     
@@ -245,7 +227,6 @@ def extract_project_tech_stack(project_text, skills_list):
     found_tech = []
     
     for skill in skills_list:
-        # Use word boundaries to match whole words
         if re.search(r'\b' + re.escape(skill) + r'\b', text_lower):
             found_tech.append(skill)
             
@@ -254,24 +235,17 @@ def extract_project_tech_stack(project_text, skills_list):
     else:
         return "Tech stack not explicitly mentioned or recognized."
 
-def format_achievements(achievements_text, max_bullets=5): # Default max_bullets for general achievements
-    """
-    Extracts top sentences from achievement text and formats them as a bulleted list.
-    Aims for conciseness by selecting a limited number of high-scoring sentences.
-    """
+def format_achievements(achievements_text, max_bullets=5):
     if not achievements_text.strip():
         return "Not found"
     
-    # Tokenize the achievements text into sentences
     sents = sent_tokenize(achievements_text.strip())
     
-    # Filter out very short or non-descriptive sentences (e.g., less than 4 words)
     meaningful_sents = [s.strip() for s in sents if len(s.split()) > 3] 
     
     if not meaningful_sents:
         return "Not found"
 
-    # Calculate word frequency for scoring
     word_freq = Counter([w.lower() for w in word_tokenize(achievements_text) if w.isalnum()])
     
     sent_scores = {}
@@ -279,11 +253,8 @@ def format_achievements(achievements_text, max_bullets=5): # Default max_bullets
         score = sum(word_freq[w.lower()] for w in word_tokenize(s) if w.isalnum())
         sent_scores[i] = score
         
-    # Get indices of top 'max_bullets' scoring sentences
-    # If fewer meaningful sentences than max_bullets, take all
     top_sents_indices = sorted(sent_scores, key=sent_scores.get, reverse=True)[:min(len(meaningful_sents), max_bullets)]
     
-    # Sort these indices to display achievements in their original order
     sorted_sents_indices = sorted(top_sents_indices)
     
     formatted_achievements_list = []
@@ -320,10 +291,7 @@ def get_achievements_projects(text):
     return achievements_formatted, projects_summary 
 
 def extract_cpi(text):
-    """
-    Extracts B.Tech CPI/CGPA/GPA specifically from the resume text.
-    """
-    education_keywords = ["education", "academic qualifications", "academics"]
+    education_keywords = ["education", "academic qualifications", "academics", "educational background"]
     sections = extract_sections(text, education_keywords)
     education_text = ""
     for kw in education_keywords:
@@ -332,78 +300,77 @@ def extract_cpi(text):
             break
 
     if not education_text.strip():
+        search_target_text = text
+    else:
+        search_target_text = education_text
+
+    if not search_target_text.strip():
         return "Not found"
 
-    # Keywords to identify B.Tech or equivalent degree sections
     btech_keywords = [
         r'bachelor\s*of\s*technology',
         r'b\.?tech',
         r'engineering',
-        r'b\.?e\b', # Bachelor of Engineering
+        r'b\.?e\b',
         r'undergraduate'
     ]
 
-    lines = education_text.split('\n')
-    btech_start_index = -1
+    cpi_gpa_patterns_priority = [
+        # Pattern 1: Very strong match for "CGPA/%" or "CGPA" followed by a decimal number X.XX
+        re.compile(r'(?:CGPA/?%|CGPA|GPA|CPI|SGPA)\s*[:=]?\s*(\d\.\d{1,2})\s*(?:/10|\s*out of 10)?', re.IGNORECASE),
+        # Pattern 2: Decimal number X.XX immediately followed by /10 or 'out of 10'
+        re.compile(r'(\d\.\d{1,2})\s*(?:/10|\s*out of 10)\b', re.IGNORECASE),
+        # Pattern 3: Scored/Aggregate/Overall/Obtained followed by X.XX and optional /10
+        re.compile(r'\b(?:scored|aggregate|overall|obtained)\s*(\d\.\d{1,2})(?:\s*\/10|\s*out of 10)?', re.IGNORECASE),
+        # Pattern 4: A decimal number X.XX, with a positive lookahead for academic context (e.g., /10, CPI)
+        re.compile(r'(\d\.\d{1,2})\b(?=\s*(?:CPI|CGPA|GPA|SGPA|percentage|marks|\/10))', re.IGNORECASE),
+        # Pattern 5: Handle a perfect 10 (integer or decimal) if it's explicitly stated as a CGPA/GPA.
+        re.compile(r'\b(10(?:\.0{1,2})?)\b(?=\s*(?:CPI|CGPA|GPA|SGPA|\/10))', re.IGNORECASE)
+    ]
     
-    # Find the start index of the B.Tech block
+    # Try to find B.Tech context first for a more focused search
+    # Reduced window to make it even more specific to the B.Tech line and immediate academic details.
+    lines = search_target_text.split('\n')
+    btech_related_text = ""
+    btech_found_index = -1
     for i, line in enumerate(lines):
         line_lower = line.lower()
         if any(re.search(kw, line_lower) for kw in btech_keywords):
-            btech_start_index = i
-            break # Found the start of B.Tech block
+            btech_found_index = i
+            break
 
-    search_text_for_cpi = ""
-    if btech_start_index != -1:
-        btech_end_index = -1
-        # Now find the end of this block. It ends when a new degree/board entry begins
-        # or a very long empty sequence occurs.
-        for i in range(btech_start_index + 1, len(lines)):
-            line_lower = lines[i].lower()
-            # General heuristic for new degree/board:
-            # - Contains "Board" or "Class" or "X", "XII", "10th", "12th" or "SSC" but not "b.tech" or "engineering" (to avoid matching multiple B.Tech degrees if present)
-            # - Or if it's a new post-graduate degree (Master, Ph.D.)
-            # - Or if it's a short capitalized line indicating a new degree/board, not a year.
-            if (re.search(r'\b(cbse|board|class|x|xii|10th|12th|ssc)\b', line_lower) and not any(re.search(kw, line_lower) for kw in btech_keywords)) or \
-               (re.search(r'(master|ph\.?d|post\s*graduate)', line_lower) and len(line_lower.split()) < 6) or \
-               (len(lines[i].strip().split()) <= 4 and lines[i].strip() and lines[i].strip()[0].isupper() and not re.search(r'\d{4}', lines[i].strip())): 
-                btech_end_index = i
-                break
+    # If B.Tech found, create a tight window around it
+    if btech_found_index != -1:
+        # Adjusted window: 2 lines before, and up to 5 lines after.
+        # This covers the B.Tech row and the following academic details including CGPA.
+        start_idx = max(0, btech_found_index - 2)
+        end_idx = min(len(lines), btech_found_index + 5)
+        btech_related_text = "\n".join(lines[start_idx:end_idx])
         
-        if btech_end_index == -1: # If no explicit end found, take till end of education text
-            btech_end_index = len(lines)
-        
-        # Now, `btech_related_text_lines` will be the relevant block
-        btech_related_text_lines = lines[btech_start_index:btech_end_index]
-        search_text_for_cpi = "\n".join(btech_related_text_lines).strip()
-    else: # If B.Tech keywords were not found, search the entire education text as a fallback
-        search_text_for_cpi = education_text
+        for pattern in cpi_gpa_patterns_priority:
+            matches = pattern.findall(btech_related_text)
+            for match in matches:
+                try:
+                    score_str = match if isinstance(match, str) else match[0]
+                    val = float(score_str)
+                    if 0.0 <= val <= 10.0:
+                        # Ensure output format is consistent, e.g., 6.93/10 or 10/10
+                        if '.' in score_str:
+                            return f"{val:.2f}/10"
+                        else:
+                            return f"{int(val)}/10"
+                except ValueError:
+                    continue
 
-    if not search_text_for_cpi:
-        return "Not found"
-
-    # Regex patterns for CGPA/GPA (e.g., 8.5, 9.25/10, 8.9 out of 10)
-    cpi_gpa_patterns = [
-        re.compile(r'(\d(?:\.\d{1,2})?)\s*(?:CPI|CGPA|GPA|SGPA)(?:\s*\/10|\s*out of 10)?', re.IGNORECASE),
-        re.compile(r'(?:CPI|CGPA|GPA|SGPA)\s*[:=]?\s*(\d(?:\.\d{1,2})?)(?:\s*\/10|\s*out of 10)?', re.IGNORECASE),
-        re.compile(r'scored\s*(\d(?:\.\d{1,2})?)(?:\s*\/10|\s*out of 10)', re.IGNORECASE),
-        re.compile(r'\b(?:aggregate|overall)\s*(\d(?:\.\d{1,2})?)(?:\s*\/10|\s*out of 10)\b', re.IGNORECASE),
-        re.compile(r'(\d(?:\.\d{1,2})?)\s*\/\s*10(?:\.0)?', re.IGNORECASE),
-        re.compile(r'\b(\d{1}\.\d{1,2})\b', re.IGNORECASE), # Matches single digit.decimal.1-2 digits like 6.93
-        re.compile(r'\b(10(?:\.0{1,2})?)\b', re.IGNORECASE) # Matches perfect 10 or 10.0, 10.00
-    ]
-
-    # Search for CGPA/GPA within the B.Tech related text
-    for pattern in cpi_gpa_patterns:
-        matches = pattern.findall(search_text_for_cpi)
+    # Fallback: if no specific B.Tech context found or no CPI in that context, search the entire text
+    # This might pick up scores from other degrees (like 10/10 from Telangana Board - X), but it's a fallback.
+    for pattern in cpi_gpa_patterns_priority:
+        matches = pattern.findall(search_target_text)
         for match in matches:
             try:
-                # Ensure match is a string, not a tuple from multiple capture groups if pattern has them
-                score_str = match if isinstance(match, str) else match[0] # Take the first group if it's a tuple
+                score_str = match if isinstance(match, str) else match[0]
                 val = float(score_str)
-                if 0.0 <= val <= 10.0: # Valid range for typical CGPA/GPA
-                    # Format to 2 decimal places if it was a float, for consistency
-                    # or as an integer if it's a whole number like 8, 9, 10
+                if 0.0 <= val <= 10.0:
                     if '.' in score_str:
                         return f"{val:.2f}/10"
                     else:
@@ -411,7 +378,6 @@ def extract_cpi(text):
             except ValueError:
                 continue
 
-    # If no specific B.Tech CGPA/GPA found, return "Not found"
     return "Not found"
 
 
@@ -460,25 +426,21 @@ def calculate_ats_score(resume_text, job_description_text):
 
 st.set_page_config(page_title="Resume Parser & Job Classifier with ATS Score", layout="wide")
 
-# Custom CSS for a white background and improved aesthetics
 st.markdown("""
 <style>
 .stApp {
-    background-color: #FFFFFF; /* White background for the entire app */
-    color: #333333; /* Default text color */
+    background-color: #FFFFFF;
+    color: #333333;
 }
-/* Target Streamlit's main content area which often has a dark background by default */
 .st-emotion-cache-fis6y9, .st-emotion-cache-1wv7q08, .st-emotion-cache-1kenbb8 {
-    background-color: #FFFFFF; /* Ensure main content area is also white */
+    background-color: #FFFFFF;
 }
 
-/* Styling for specific Streamlit components to give them a modern look */
-.st-emotion-cache-1pbsqon, .st-emotion-cache-1wmy9hq { /* Common classes for headers/titles */
-    color: #0056b3; /* A nice blue for titles/headers */
+.st-emotion-cache-1pbsqon, .st-emotion-cache-1wmy9hq {
+    color: #0056b3;
     font-weight: bold;
 }
 
-/* Style for input elements and text areas */
 .stTextArea > label, .stFileUploader > label {
     font-weight: bold;
     color: #0056b3;
@@ -502,9 +464,8 @@ st.markdown("""
     border-color: #007bff;
 }
 
-/* Button Styling */
 .stButton>button {
-    background-color: #007bff; /* Primary blue */
+    background-color: #007bff;
     color: white;
     border-radius: 8px;
     padding: 10px 20px;
@@ -513,17 +474,16 @@ st.markdown("""
     cursor: pointer;
     box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     transition: background-color 0.3s ease, transform 0.2s ease;
-    margin-top: 15px; /* Add some spacing */
+    margin-top: 15px;
 }
 .stButton>button:hover {
-    background-color: #0056b3; /* Darker blue on hover */
+    background-color: #0056b3;
     transform: translateY(-2px);
 }
 .stButton>button:active {
     transform: translateY(0);
 }
 
-/* Info, Success, Warning boxes */
 .stAlert {
     border-radius: 8px;
     padding: 15px 20px;
@@ -532,22 +492,21 @@ st.markdown("""
     font-size: 1rem;
 }
 .stAlert.info {
-    background-color: #e0f2f7; /* Light blue */
+    background-color: #e0f2f7;
     color: #007bff;
     border-left: 5px solid #007bff;
 }
 .stAlert.success {
-    background-color: #e6ffe6; /* Light green */
+    background-color: #e6ffe6;
     color: #28a745;
     border-left: 5px solid #28a745;
 }
 .stAlert.warning {
-    background-color: #fff3e0; /* Light orange */
+    background-color: #fff3e0;
     color: #ffc107;
     border-left: 5px solid #ffc107;
 }
 
-/* General text styling */
 p {
     line-height: 1.6;
 }
@@ -560,13 +519,12 @@ strong {
 st.title("Resume Parser & Job Classifier with ATS Score")
 st.markdown("Upload your resume and paste a job description to extract details, generate a summary, classify job role, and get an ATS match score.")
 
-# Added a separator for better visual structure
 st.markdown("---")
 
 col1, col2 = st.columns(2)
 
 with col1:
-    st.header("Resume Upload") # Added sub-header
+    st.header("Resume Upload")
     file = st.file_uploader("Upload Resume File", type=["pdf", "docx", "txt"])
     if st.session_state.get('processed_file', None) is not None:
         if st.button("Clear Processed Data", key="clear_data"):
@@ -574,7 +532,7 @@ with col1:
             st.experimental_rerun()
 
 with col2:
-    st.header("Job Description") # Added sub-header
+    st.header("Job Description")
     job_description = st.text_area("Paste Job Description Here", height=300, 
                                    help="Copy and paste the full job description text here for ATS matching. This helps the ATS score calculation.")
 
